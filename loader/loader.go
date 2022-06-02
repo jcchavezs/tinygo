@@ -154,7 +154,7 @@ func Load(config *compileopts.Config, inputPkg string, clangHeaders string, type
 
 	var (
 		testingPkgs = map[int]*Package{}
-		testPkgs    = map[string]*Package{}
+		testPkgs    = map[string][]*Package{}
 	)
 	for {
 		insertPkg := true
@@ -245,12 +245,19 @@ func Load(config *compileopts.Config, inputPkg string, clangHeaders string, type
 							break
 						}
 					}
+				} else if strings.HasSuffix(newImportPath, "_test") {
+					// if it is a _test package we also need to guarantee it will be added to testingPackages slice so
+					// it can be readded later respecting the order.
+					testingImportPath := newImportPath[:len(newImportPath)-len("_test")]
+					testPkgs[testingImportPath] = append(testPkgs[testingImportPath], pkg)
+					insertPkg = false
 				}
 				pkg.ImportPath = newImportPath
 			} else if strings.HasSuffix(pkg.ImportPath, ".test") {
 				// If the test package get listed we want to delay the addition of it, right after
 				// the main package to avoid dependency errors.
-				testPkgs[pkg.ImportPath[:len(pkg.ImportPath)-len(".test")]] = pkg
+				testingImportPath := pkg.ImportPath[:len(pkg.ImportPath)-len(".test")]
+				testPkgs[testingImportPath] = append(testPkgs[testingImportPath], pkg)
 				insertPkg = false
 			}
 		}
@@ -268,9 +275,9 @@ func Load(config *compileopts.Config, inputPkg string, clangHeaders string, type
 	sort.Ints(keys)
 	for _, k := range keys {
 		p.sorted = append(p.sorted, testingPkgs[k])
-		// if we find a testing package, we will add it.
-		if testPkg, ok := testPkgs[testingPkgs[k].ImportPath]; ok {
-			p.sorted = append(p.sorted, testPkg)
+		// if we find test packages, we add them right after the testing package.
+		if testPkgs, ok := testPkgs[testingPkgs[k].ImportPath]; ok {
+			p.sorted = append(p.sorted, testPkgs...)
 		}
 	}
 
