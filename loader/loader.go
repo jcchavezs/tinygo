@@ -39,6 +39,7 @@ type Program struct {
 
 	Packages map[string]*Package
 	sorted   []*Package
+	mainPkg  *Package
 	fset     *token.FileSet
 
 	// Information obtained during parsing.
@@ -266,6 +267,7 @@ func Load(config *compileopts.Config, inputPkg string, clangHeaders string, type
 		if insertPkg {
 			p.sorted = append(p.sorted, pkg)
 		}
+		p.mainPkg = pkg
 	}
 
 	keys := make([]int, 0, len(testingPkgs))
@@ -332,7 +334,7 @@ func (p *Program) Sorted() []*Package {
 // MainPkg returns the last package in the Sorted() slice. This is the main
 // package of the program.
 func (p *Program) MainPkg() *Package {
-	return p.sorted[len(p.sorted)-1]
+	return p.mainPkg
 }
 
 // Parse parses all packages and typechecks them.
