@@ -1253,6 +1253,9 @@ func parseGoLinkFlag(flagsString string) (map[string]map[string]string, error) {
 	return map[string]map[string]string(globalVarValues), nil
 }
 
+// getListOfPackages returns a standard list of packages for a given list that might
+// include wildards using `go list`.
+// For example [./...] => ["pkg1", "pkg1/pkg12", "pkg2"]
 func getListOfPackages(pkgs []string, options *compileopts.Options) ([]string, error) {
 	config, err := builder.NewConfig(options)
 	if err != nil {
@@ -1264,7 +1267,7 @@ func getListOfPackages(pkgs []string, options *compileopts.Options) ([]string, e
 	}
 	outputBuf := bytes.NewBuffer(nil)
 	cmd.Stdout = outputBuf
-	cmd.Stderr = io.Discard
+	cmd.Stderr = os.Stderr
 	err = cmd.Run()
 	if err != nil {
 		return nil, err
