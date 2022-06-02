@@ -281,9 +281,17 @@ func Load(config *compileopts.Config, inputPkg string, clangHeaders string, type
 	for _, k := range keys {
 		p.sorted = append(p.sorted, testingPkgs[k])
 		// if we find test packages, we add them right after the testing package.
-		if testPkgs, ok := testPkgs[testingPkgs[k].ImportPath]; ok {
-			p.sorted = append(p.sorted, testPkgs...)
+		if pkgs, ok := testPkgs[testingPkgs[k].ImportPath]; ok {
+			p.sorted = append(p.sorted, pkgs...)
+			delete(testPkgs, testingPkgs[k].ImportPath)
 		}
+	}
+
+	// it can happen that there is pkga but not pkga [pkga.test] in which case testingPkgs
+	// does not contain pkga, however pkga_test is in testPkgs, hence we backfill the orphan
+	// tests into the sorted slice.
+	for _, pkg := range testPkgs {
+		p.sorted = append(p.sorted, pkg...)
 	}
 
 	if _, ok := p.Packages[inputPkg+".test"]; config.TestConfig.CompileTestBinary && !ok {
