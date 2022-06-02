@@ -748,9 +748,6 @@ func (p *Package) Import(to string) (*types.Package, error) {
 		to = newTo
 	}
 	if imported, ok := p.program.Packages[to]; ok {
-		if imported.Pkg == nil {
-			fmt.Println("trying to get testing:", to)
-		}
 		return imported.Pkg, nil
 	} else {
 		return nil, errors.New("package not imported: " + to)
