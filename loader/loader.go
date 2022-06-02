@@ -158,7 +158,6 @@ func Load(config *compileopts.Config, inputPkg string, clangHeaders string, type
 		testPkgs    = map[string][]*Package{}
 	)
 	for {
-		insertPkg := true
 		pkg := &Package{
 			program:      p,
 			FileHashes:   make(map[string][]byte),
@@ -210,6 +209,10 @@ func Load(config *compileopts.Config, inputPkg string, clangHeaders string, type
 			}
 			return nil, err
 		}
+
+		// insertPkgDirectly decides whether to insert pkg directly into the
+		// sorted list or afterwards preserving the dependency order.
+		insertPkgDirectly := true
 		if config.TestConfig.CompileTestBinary {
 			// When creating a test binary, `go list` will list two or three
 			// packages used for testing the package. The first is the original
@@ -242,7 +245,7 @@ func Load(config *compileopts.Config, inputPkg string, clangHeaders string, type
 							p.sorted = append(p.sorted[:i], p.sorted[i+1:]...) // remove element from slice
 							// add the package to testingPackages slice so it can be readded later respecting the order.
 							testingPkgs[i+len(testingPkgs)] = pkg
-							insertPkg = false // do not insert in the loop, we will insert it later in the right order
+							insertPkgDirectly = false // do not insert in the loop, we will insert it later in the right order
 							break
 						}
 					}
@@ -251,7 +254,7 @@ func Load(config *compileopts.Config, inputPkg string, clangHeaders string, type
 					// it can be readded later respecting the order.
 					testingImportPath := newImportPath[:len(newImportPath)-len("_test")]
 					testPkgs[testingImportPath] = append(testPkgs[testingImportPath], pkg)
-					insertPkg = false
+					insertPkgDirectly = false // do not insert in the loop, we will insert it later in the right order
 				}
 				pkg.ImportPath = newImportPath
 			} else if strings.HasSuffix(pkg.ImportPath, ".test") {
@@ -259,12 +262,12 @@ func Load(config *compileopts.Config, inputPkg string, clangHeaders string, type
 				// the main package to avoid dependency errors.
 				testingImportPath := pkg.ImportPath[:len(pkg.ImportPath)-len(".test")]
 				testPkgs[testingImportPath] = append(testPkgs[testingImportPath], pkg)
-				insertPkg = false
+				insertPkgDirectly = false
 			}
 		}
 
 		p.Packages[pkg.ImportPath] = pkg
-		if insertPkg {
+		if insertPkgDirectly {
 			p.sorted = append(p.sorted, pkg)
 		}
 		p.mainPkg = pkg
@@ -331,8 +334,8 @@ func (p *Program) Sorted() []*Package {
 	return p.sorted
 }
 
-// MainPkg returns the last package in the Sorted() slice. This is the main
-// package of the program.
+// MainPkg returns the last package added from the sorted dependency list. This
+// is the main package of the program.
 func (p *Program) MainPkg() *Package {
 	return p.mainPkg
 }
