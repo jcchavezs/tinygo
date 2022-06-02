@@ -19,6 +19,7 @@ import (
 	"path"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"unicode"
@@ -104,7 +105,7 @@ type EmbedFile struct {
 // Load loads the given package with all dependencies (including the runtime
 // package). Call .Parse() afterwards to parse all Go files (including CGo
 // processing, if necessary).
-func Load(config *compileopts.Config, inputPkgs []string, clangHeaders string, typeChecker types.Config) (*Program, error) {
+func Load(config *compileopts.Config, inputPkg string, clangHeaders string, typeChecker types.Config) (*Program, error) {
 	goroot, err := GetCachedGoroot(config)
 	if err != nil {
 		return nil, err
@@ -133,7 +134,7 @@ func Load(config *compileopts.Config, inputPkgs []string, clangHeaders string, t
 	if config.TestConfig.CompileTestBinary {
 		extraArgs = append(extraArgs, "-test")
 	}
-	cmd, err := List(config, extraArgs, inputPkgs)
+	cmd, err := List(config, extraArgs, []string{inputPkg})
 	if err != nil {
 		return nil, err
 	}
@@ -150,7 +151,13 @@ func Load(config *compileopts.Config, inputPkgs []string, clangHeaders string, t
 
 	// Parse the returned json from `go list`.
 	decoder := json.NewDecoder(buf)
+
+	var (
+		testingPkgs = map[int]*Package{}
+		testPkgs    = map[string]*Package{}
+	)
 	for {
+		insertPkg := true
 		pkg := &Package{
 			program:      p,
 			FileHashes:   make(map[string][]byte),
@@ -222,29 +229,55 @@ func Load(config *compileopts.Config, inputPkgs []string, clangHeaders string, t
 			// This is necessary because the change in import paths results in
 			// breakage to //go:linkname. Additionally, the duplicated package
 			// slows down the build and so is best removed.
+			// The replacer package must be added keeping the same order it was listed
+			// to keep sorted packages.
 			if pkg.ForTest != "" && strings.HasSuffix(pkg.ImportPath, " ["+pkg.ForTest+".test]") {
 				newImportPath := pkg.ImportPath[:len(pkg.ImportPath)-len(" ["+pkg.ForTest+".test]")]
 				if _, ok := p.Packages[newImportPath]; ok {
 					// Delete the previous package (that this package overrides).
 					delete(p.Packages, newImportPath)
-					for i, pkg := range p.sorted {
-						if pkg.ImportPath == newImportPath {
+					for i, pp := range p.sorted {
+						if pp.ImportPath == newImportPath {
 							p.sorted = append(p.sorted[:i], p.sorted[i+1:]...) // remove element from slice
+							// add the package to testingPackages slice so it can be readded later respecting the order.
+							testingPkgs[i+len(testingPkgs)] = pkg
+							insertPkg = false // do not insert in the loop, we will insert it later in the right order
 							break
 						}
 					}
 				}
 				pkg.ImportPath = newImportPath
+			} else if strings.HasSuffix(pkg.ImportPath, ".test") {
+				// If the test package get listed we want to delay the addition of it, right after
+				// the main package to avoid dependency errors.
+				testPkgs[pkg.ImportPath[:len(pkg.ImportPath)-len(".test")]] = pkg
+				insertPkg = false
 			}
 		}
-		p.sorted = append(p.sorted, pkg)
+
 		p.Packages[pkg.ImportPath] = pkg
+		if insertPkg {
+			p.sorted = append(p.sorted, pkg)
+		}
 	}
 
-	if config.TestConfig.CompileTestBinary && !strings.HasSuffix(p.sorted[len(p.sorted)-1].ImportPath, ".test") {
+	keys := make([]int, 0, len(testingPkgs))
+	for k := range testingPkgs {
+		keys = append(keys, k)
+	}
+	sort.Ints(keys)
+	for _, k := range keys {
+		p.sorted = append(p.sorted, testingPkgs[k])
+		// if we find a testing package, we will add it.
+		if testPkg, ok := testPkgs[testingPkgs[k].ImportPath]; ok {
+			p.sorted = append(p.sorted, testPkg)
+		}
+	}
+
+	if _, ok := p.Packages[inputPkg+".test"]; config.TestConfig.CompileTestBinary && !ok {
 		// Trying to compile a test binary but there are no test files in this
 		// package.
-		return p, NoTestFilesError{p.sorted[len(p.sorted)-1].ImportPath}
+		return p, NoTestFilesError{inputPkg}
 	}
 
 	return p, nil
@@ -715,8 +748,13 @@ func (p *Package) Import(to string) (*types.Package, error) {
 		to = newTo
 	}
 	if imported, ok := p.program.Packages[to]; ok {
+		if imported.Pkg == nil {
+			fmt.Println("trying to get testing:", to)
+		}
 		return imported.Pkg, nil
 	} else {
 		return nil, errors.New("package not imported: " + to)
 	}
 }
+
+var _ types.Importer = (*Package)(nil)
