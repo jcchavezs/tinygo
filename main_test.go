@@ -13,6 +13,7 @@ import (
 	"io/ioutil"
 	"os"
 	"os/exec"
+	"reflect"
 	"regexp"
 	"runtime"
 	"strings"
@@ -500,27 +501,6 @@ func TestTest(t *testing.T) {
 					t.Error("test passed")
 				}
 			})
-
-			t.Run("./...", func(t *testing.T) {
-				t.Parallel()
-
-				// Test a package which fails to build.
-
-				var wg sync.WaitGroup
-				defer wg.Wait()
-
-				out := ioLogger(t, &wg)
-				defer out.Close()
-
-				opts := targ.opts
-				passed, err := Test("github.com/tinygo-org/tinygo/tests/testing/threedots/...", out, out, &opts, false, false, false, "", "", "", "")
-				if err != nil {
-					t.Errorf("test did error: %v", err)
-				}
-				if !passed {
-					t.Error("test did not passed")
-				}
-			})
 		})
 	}
 }
@@ -539,6 +519,48 @@ func ioLogger(t *testing.T, wg *sync.WaitGroup) io.WriteCloser {
 	}()
 
 	return w
+}
+
+func TestGetListOfPackages(t *testing.T) {
+	opts := optionsFromTarget("", sema)
+	tests := []struct {
+		pkgs          []string
+		expectedPkgs  []string
+		expectesError bool
+	}{
+		{
+			pkgs: []string{"./tests/testing/..."},
+			expectedPkgs: []string{
+				"github.com/tinygo-org/tinygo/tests/testing/builderr",
+				"github.com/tinygo-org/tinygo/tests/testing/fail",
+				"github.com/tinygo-org/tinygo/tests/testing/nothing",
+				"github.com/tinygo-org/tinygo/tests/testing/pass",
+			},
+		},
+		{
+			pkgs: []string{"./tests/testing/pass"},
+			expectedPkgs: []string{
+				"github.com/tinygo-org/tinygo/tests/testing/pass",
+			},
+		},
+		{
+			pkgs:          []string{"./tests/testing"},
+			expectesError: true,
+		},
+	}
+
+	for _, test := range tests {
+		actualPkgs, err := getListOfPackages(test.pkgs, &opts)
+		if err != nil && !test.expectesError {
+			t.Errorf("unexpected error: %v", err)
+		} else if err == nil && test.expectesError {
+			t.Error("expected error, but got none")
+		}
+
+		if !reflect.DeepEqual(test.expectedPkgs, actualPkgs) {
+			t.Errorf("expected two slices to be equal, expected %v got %v", test.expectedPkgs, actualPkgs)
+		}
+	}
 }
 
 // This TestMain is necessary because TinyGo may also be invoked to run certain
