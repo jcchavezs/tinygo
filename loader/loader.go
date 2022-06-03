@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"go/ast"
-	"go/constant"
 	"go/parser"
 	"go/scanner"
 	"go/token"
@@ -16,13 +15,10 @@ import (
 	"io/ioutil"
 	"os"
 	"os/exec"
-	"path"
 	"path/filepath"
 	"runtime"
-	"sort"
 	"strconv"
 	"strings"
-	"unicode"
 
 	"github.com/tinygo-org/tinygo/cgo"
 	"github.com/tinygo-org/tinygo/compileopts"
@@ -39,7 +35,6 @@ type Program struct {
 
 	Packages map[string]*Package
 	sorted   []*Package
-	mainPkg  *Package
 	fset     *token.FileSet
 
 	// Information obtained during parsing.
@@ -66,9 +61,6 @@ type PackageJSON struct {
 	CgoFiles []string
 	CFiles   []string
 
-	// Embedded files
-	EmbedFiles []string
-
 	// Dependency information
 	Imports   []string
 	ImportMap map[string]string
@@ -85,22 +77,13 @@ type PackageJSON struct {
 type Package struct {
 	PackageJSON
 
-	program      *Program
-	Files        []*ast.File
-	FileHashes   map[string][]byte
-	CFlags       []string // CFlags used during CGo preprocessing (only set if CGo is used)
-	CGoHeaders   []string // text above 'import "C"' lines
-	EmbedGlobals map[string][]*EmbedFile
-	Pkg          *types.Package
-	info         types.Info
-}
-
-type EmbedFile struct {
-	Name      string
-	Size      uint64
-	Hash      string // hash of the file (as a hex string)
-	NeedsData bool   // true if this file is embedded as a byte slice
-	Data      []byte // contents of this file (only if NeedsData is set)
+	program    *Program
+	Files      []*ast.File
+	FileHashes map[string][]byte
+	CFlags     []string // CFlags used during CGo preprocessing (only set if CGo is used)
+	CGoHeaders []string // text above 'import "C"' lines
+	Pkg        *types.Package
+	info       types.Info
 }
 
 // Load loads the given package with all dependencies (including the runtime
@@ -152,16 +135,10 @@ func Load(config *compileopts.Config, inputPkg string, clangHeaders string, type
 
 	// Parse the returned json from `go list`.
 	decoder := json.NewDecoder(buf)
-
-	var (
-		testingPkgs = map[int]*Package{}
-		testPkgs    = map[string][]*Package{}
-	)
 	for {
 		pkg := &Package{
-			program:      p,
-			FileHashes:   make(map[string][]byte),
-			EmbedGlobals: make(map[string][]*EmbedFile),
+			program:    p,
+			FileHashes: make(map[string][]byte),
 			info: types.Info{
 				Types:      make(map[ast.Expr]types.TypeAndValue),
 				Defs:       make(map[*ast.Ident]types.Object),
@@ -209,10 +186,6 @@ func Load(config *compileopts.Config, inputPkg string, clangHeaders string, type
 			}
 			return nil, err
 		}
-
-		// insertPkgDirectly decides whether to insert pkg directly into the
-		// sorted list or afterwards preserving the dependency order.
-		insertPkgDirectly := true
 		if config.TestConfig.CompileTestBinary {
 			// When creating a test binary, `go list` will list two or three
 			// packages used for testing the package. The first is the original
@@ -233,71 +206,29 @@ func Load(config *compileopts.Config, inputPkg string, clangHeaders string, type
 			// This is necessary because the change in import paths results in
 			// breakage to //go:linkname. Additionally, the duplicated package
 			// slows down the build and so is best removed.
-			// The replacer package must be added keeping the same order it was listed
-			// to keep sorted packages.
 			if pkg.ForTest != "" && strings.HasSuffix(pkg.ImportPath, " ["+pkg.ForTest+".test]") {
 				newImportPath := pkg.ImportPath[:len(pkg.ImportPath)-len(" ["+pkg.ForTest+".test]")]
 				if _, ok := p.Packages[newImportPath]; ok {
 					// Delete the previous package (that this package overrides).
 					delete(p.Packages, newImportPath)
-					for i, pp := range p.sorted {
-						if pp.ImportPath == newImportPath {
+					for i, pkg := range p.sorted {
+						if pkg.ImportPath == newImportPath {
 							p.sorted = append(p.sorted[:i], p.sorted[i+1:]...) // remove element from slice
-							// add the package to testingPackages slice so it can be readded later respecting the order.
-							testingPkgs[i+len(testingPkgs)] = pkg
-							insertPkgDirectly = false // do not insert in the loop, we will insert it later in the right order
 							break
 						}
 					}
-				} else if strings.HasSuffix(newImportPath, "_test") {
-					// if it is a _test package we also need to guarantee it will be added to testingPackages slice so
-					// it can be readded later respecting the order.
-					testingImportPath := newImportPath[:len(newImportPath)-len("_test")]
-					testPkgs[testingImportPath] = append(testPkgs[testingImportPath], pkg)
-					insertPkgDirectly = false // do not insert in the loop, we will insert it later in the right order
 				}
 				pkg.ImportPath = newImportPath
-			} else if strings.HasSuffix(pkg.ImportPath, ".test") {
-				// If the test package get listed we want to delay the addition of it, right after
-				// the main package to avoid dependency errors.
-				testingImportPath := pkg.ImportPath[:len(pkg.ImportPath)-len(".test")]
-				testPkgs[testingImportPath] = append(testPkgs[testingImportPath], pkg)
-				insertPkgDirectly = false
 			}
 		}
-
+		p.sorted = append(p.sorted, pkg)
 		p.Packages[pkg.ImportPath] = pkg
-		if insertPkgDirectly {
-			p.sorted = append(p.sorted, pkg)
-		}
-		p.mainPkg = pkg
 	}
 
-	keys := make([]int, 0, len(testingPkgs))
-	for k := range testingPkgs {
-		keys = append(keys, k)
-	}
-	sort.Ints(keys)
-	for _, k := range keys {
-		p.sorted = append(p.sorted, testingPkgs[k])
-		// if we find test packages, we add them right after the testing package.
-		if pkgs, ok := testPkgs[testingPkgs[k].ImportPath]; ok {
-			p.sorted = append(p.sorted, pkgs...)
-			delete(testPkgs, testingPkgs[k].ImportPath)
-		}
-	}
-
-	// it can happen that there is pkga but not pkga [pkga.test] in which case testingPkgs
-	// does not contain pkga, however pkga_test is in testPkgs, hence we backfill the orphan
-	// tests into the sorted slice.
-	for _, pkg := range testPkgs {
-		p.sorted = append(p.sorted, pkg...)
-	}
-
-	if _, ok := p.Packages[inputPkg+".test"]; config.TestConfig.CompileTestBinary && !ok {
+	if config.TestConfig.CompileTestBinary && !strings.HasSuffix(p.sorted[len(p.sorted)-1].ImportPath, ".test") {
 		// Trying to compile a test binary but there are no test files in this
 		// package.
-		return p, NoTestFilesError{inputPkg}
+		return p, NoTestFilesError{p.sorted[len(p.sorted)-1].ImportPath}
 	}
 
 	return p, nil
@@ -342,10 +273,10 @@ func (p *Program) Sorted() []*Package {
 	return p.sorted
 }
 
-// MainPkg returns the last package added from the sorted dependency list. This
-// is the main package of the program.
+// MainPkg returns the last package in the Sorted() slice. This is the main
+// package of the program.
 func (p *Program) MainPkg() *Package {
-	return p.mainPkg
+	return p.sorted[len(p.sorted)-1]
 }
 
 // Parse parses all packages and typechecks them.
@@ -426,15 +357,15 @@ func (p *Package) Check() error {
 		return nil // already typechecked
 	}
 
-	// Prepare some state used during type checking.
 	var typeErrors []error
 	checker := p.program.typeChecker // make a copy, because it will be modified
 	checker.Error = func(err error) {
 		typeErrors = append(typeErrors, err)
 	}
-	checker.Importer = p
 
 	// Do typechecking of the package.
+	checker.Importer = p
+
 	packageName := p.ImportPath
 	if p == p.program.MainPkg() {
 		if p.Name != "main" {
@@ -451,12 +382,6 @@ func (p *Package) Check() error {
 		return Errors{p, typeErrors}
 	}
 	p.Pkg = typesPkg
-
-	p.extractEmbedLines(checker.Error)
-	if len(typeErrors) != 0 {
-		return Errors{p, typeErrors}
-	}
-
 	return nil
 }
 
@@ -515,249 +440,6 @@ func (p *Package) parseFiles() ([]*ast.File, error) {
 	return files, nil
 }
 
-// extractEmbedLines finds all //go:embed lines in the package and matches them
-// against EmbedFiles from `go list`.
-func (p *Package) extractEmbedLines(addError func(error)) {
-	for _, file := range p.Files {
-		// Check for an `import "embed"` line at the start of the file.
-		// //go:embed lines are only valid if the given file itself imports the
-		// embed package. It is not valid if it is only imported in a separate
-		// Go file.
-		hasEmbed := false
-		for _, importSpec := range file.Imports {
-			if importSpec.Path.Value == `"embed"` {
-				hasEmbed = true
-			}
-		}
-
-		for _, decl := range file.Decls {
-			switch decl := decl.(type) {
-			case *ast.GenDecl:
-				if decl.Tok != token.VAR {
-					continue
-				}
-				for _, spec := range decl.Specs {
-					spec := spec.(*ast.ValueSpec)
-					var doc *ast.CommentGroup
-					if decl.Lparen == token.NoPos {
-						// Plain 'var' declaration, like:
-						//   //go:embed hello.txt
-						//   var hello string
-						doc = decl.Doc
-					} else {
-						// Bigger 'var' declaration like:
-						//   var (
-						//       //go:embed hello.txt
-						//       hello string
-						//   )
-						doc = spec.Doc
-					}
-					if doc == nil {
-						continue
-					}
-
-					// Look for //go:embed comments.
-					var allPatterns []string
-					for _, comment := range doc.List {
-						if comment.Text != "//go:embed" && !strings.HasPrefix(comment.Text, "//go:embed ") {
-							continue
-						}
-						if !hasEmbed {
-							addError(types.Error{
-								Fset: p.program.fset,
-								Pos:  comment.Pos() + 2,
-								Msg:  "//go:embed only allowed in Go files that import \"embed\"",
-							})
-							// Continue, because otherwise we might run into
-							// issues below.
-							continue
-						}
-						patterns, err := p.parseGoEmbed(comment.Text[len("//go:embed"):], comment.Slash)
-						if err != nil {
-							addError(err)
-							continue
-						}
-						if len(patterns) == 0 {
-							addError(types.Error{
-								Fset: p.program.fset,
-								Pos:  comment.Pos() + 2,
-								Msg:  "usage: //go:embed pattern...",
-							})
-							continue
-						}
-						for _, pattern := range patterns {
-							// Check that the pattern is well-formed.
-							// It must be valid: the Go toolchain has already
-							// checked for invalid patterns. But let's check
-							// anyway to be sure.
-							if _, err := path.Match(pattern, ""); err != nil {
-								addError(types.Error{
-									Fset: p.program.fset,
-									Pos:  comment.Pos(),
-									Msg:  "invalid pattern syntax",
-								})
-								continue
-							}
-							allPatterns = append(allPatterns, pattern)
-						}
-					}
-
-					if len(allPatterns) != 0 {
-						// This is a //go:embed global. Do a few more checks.
-						if len(spec.Names) != 1 {
-							addError(types.Error{
-								Fset: p.program.fset,
-								Pos:  spec.Names[1].NamePos,
-								Msg:  "//go:embed cannot apply to multiple vars",
-							})
-						}
-						if spec.Values != nil {
-							addError(types.Error{
-								Fset: p.program.fset,
-								Pos:  spec.Values[0].Pos(),
-								Msg:  "//go:embed cannot apply to var with initializer",
-							})
-						}
-						globalName := spec.Names[0].Name
-						globalType := p.Pkg.Scope().Lookup(globalName).Type()
-						valid, byteSlice := isValidEmbedType(globalType)
-						if !valid {
-							addError(types.Error{
-								Fset: p.program.fset,
-								Pos:  spec.Type.Pos(),
-								Msg:  "//go:embed cannot apply to var of type " + globalType.String(),
-							})
-						}
-
-						// Match all //go:embed patterns against the embed files
-						// provided by `go list`.
-						for _, name := range p.EmbedFiles {
-							for _, pattern := range allPatterns {
-								if matchPattern(pattern, name) {
-									p.EmbedGlobals[globalName] = append(p.EmbedGlobals[globalName], &EmbedFile{
-										Name:      name,
-										NeedsData: byteSlice,
-									})
-									break
-								}
-							}
-						}
-					}
-				}
-			}
-		}
-	}
-}
-
-// matchPattern returns true if (and only if) the given pattern would match the
-// filename. The pattern could also match a parent directory of name, in which
-// case hidden files do not match.
-func matchPattern(pattern, name string) bool {
-	// Match this file.
-	matched, _ := path.Match(pattern, name)
-	if matched {
-		return true
-	}
-
-	// Match parent directories.
-	dir := name
-	for {
-		dir, _ = path.Split(dir)
-		if dir == "" {
-			return false
-		}
-		dir = path.Clean(dir)
-		if matched, _ := path.Match(pattern, dir); matched {
-			// Pattern matches the directory.
-			suffix := name[len(dir):]
-			if strings.Contains(suffix, "/_") || strings.Contains(suffix, "/.") {
-				// Pattern matches a hidden file.
-				// Hidden files are included when listed directly as a
-				// pattern, but not when they are part of a directory tree.
-				// Source:
-				// > If a pattern names a directory, all files in the
-				// > subtree rooted at that directory are embedded
-				// > (recursively), except that files with names beginning
-				// > with ‘.’ or ‘_’ are excluded.
-				return false
-			}
-			return true
-		}
-	}
-}
-
-// parseGoEmbed is like strings.Fields but for a //go:embed line. It parses
-// regular fields and quoted fields (that may contain spaces).
-func (p *Package) parseGoEmbed(args string, pos token.Pos) (patterns []string, err error) {
-	args = strings.TrimSpace(args)
-	initialLen := len(args)
-	for args != "" {
-		patternPos := pos + token.Pos(initialLen-len(args))
-		switch args[0] {
-		case '`', '"', '\\':
-			// Parse the next pattern using the Go scanner.
-			// This is perhaps a bit overkill, but it does correctly implement
-			// parsing of the various Go strings.
-			var sc scanner.Scanner
-			fset := &token.FileSet{}
-			file := fset.AddFile("", 0, len(args))
-			sc.Init(file, []byte(args), nil, 0)
-			_, tok, lit := sc.Scan()
-			if tok != token.STRING || sc.ErrorCount != 0 {
-				// Calculate start of token
-				return nil, types.Error{
-					Fset: p.program.fset,
-					Pos:  patternPos,
-					Msg:  "invalid quoted string in //go:embed",
-				}
-			}
-			pattern := constant.StringVal(constant.MakeFromLiteral(lit, tok, 0))
-			patterns = append(patterns, pattern)
-			args = strings.TrimLeftFunc(args[len(lit):], unicode.IsSpace)
-		default:
-			// The value is just a regular value.
-			// Split it at the first white space.
-			index := strings.IndexFunc(args, unicode.IsSpace)
-			if index < 0 {
-				index = len(args)
-			}
-			pattern := args[:index]
-			patterns = append(patterns, pattern)
-			args = strings.TrimLeftFunc(args[len(pattern):], unicode.IsSpace)
-		}
-		if _, err := path.Match(patterns[len(patterns)-1], ""); err != nil {
-			return nil, types.Error{
-				Fset: p.program.fset,
-				Pos:  patternPos,
-				Msg:  "invalid pattern syntax",
-			}
-		}
-	}
-	return patterns, nil
-}
-
-// isValidEmbedType returns whether the given Go type can be used as a
-// //go:embed type. This is only true for embed.FS, strings, and byte slices.
-// The second return value indicates that this is a byte slice, and therefore
-// the contents of the file needs to be passed to the compiler.
-func isValidEmbedType(typ types.Type) (valid, byteSlice bool) {
-	if typ.Underlying() == types.Typ[types.String] {
-		// string type
-		return true, false
-	}
-	if sliceType, ok := typ.Underlying().(*types.Slice); ok {
-		if elemType, ok := sliceType.Elem().Underlying().(*types.Basic); ok && elemType.Kind() == types.Byte {
-			// byte slice type
-			return true, true
-		}
-	}
-	if namedType, ok := typ.(*types.Named); ok && namedType.String() == "embed.FS" {
-		// embed.FS type
-		return true, false
-	}
-	return false, false
-}
-
 // Import implements types.Importer. It loads and parses packages it encounters
 // along the way, if needed.
 func (p *Package) Import(to string) (*types.Package, error) {
@@ -773,5 +455,3 @@ func (p *Package) Import(to string) (*types.Package, error) {
 		return nil, errors.New("package not imported: " + to)
 	}
 }
-
-var _ types.Importer = (*Package)(nil)
