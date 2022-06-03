@@ -500,6 +500,27 @@ func TestTest(t *testing.T) {
 					t.Error("test passed")
 				}
 			})
+
+			t.Run("./...", func(t *testing.T) {
+				t.Parallel()
+
+				// Test a package which fails to build.
+
+				var wg sync.WaitGroup
+				defer wg.Wait()
+
+				out := ioLogger(t, &wg)
+				defer out.Close()
+
+				opts := targ.opts
+				passed, err := Test("github.com/tinygo-org/tinygo/tests/testing/threedots/...", out, out, &opts, false, false, false, "", "", "", "")
+				if err != nil {
+					t.Errorf("test did error: %v", err)
+				}
+				if !passed {
+					t.Error("test did not passed")
+				}
+			})
 		})
 	}
 }
