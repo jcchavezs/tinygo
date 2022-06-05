@@ -529,12 +529,10 @@ func TestGetListOfPackages(t *testing.T) {
 		expectesError bool
 	}{
 		{
-			pkgs: []string{"./tests/testing/..."},
+			pkgs: []string{"./tests/testing/recurse/..."},
 			expectedPkgs: []string{
-				"github.com/tinygo-org/tinygo/tests/testing/builderr",
-				"github.com/tinygo-org/tinygo/tests/testing/fail",
-				"github.com/tinygo-org/tinygo/tests/testing/nothing",
-				"github.com/tinygo-org/tinygo/tests/testing/pass",
+				"github.com/tinygo-org/tinygo/tests/testing/recurse",
+				"github.com/tinygo-org/tinygo/tests/testing/recurse/subdir",
 			},
 		},
 		{
