@@ -739,7 +739,7 @@ func (t rawType) Name() string {
 	case Bool, Int, Int8, Int16, Int32, Int64, Uint, Uint8, Uint16, Uint32, Uint64, Float32, Float64, Complex64, Complex128, String:
 		return kind.String()
 	default:
-		return ""
+		panic("unimplemented for named types: (reflect.Type).Name()")
 	}
 }
 
